@@ -1,25 +1,39 @@
 ﻿using System.Drawing;
 using System.Drawing.Imaging;
-using Tesseract;
+using System.Collections.Concurrent;
 
 namespace HardSubExtractor.Services
 {
     /// <summary>
-    /// Service OCR sử dụng Tesseract - OPTIMIZED v2
+    /// Preprocessing mode for OCR optimization
+    /// </summary>
+    public enum PreprocessMode
+    {
+        Auto,           // Try multiple methods, pick best result
+        Otsu,           // Binary threshold (high contrast subtitles)
+        Adaptive,       // Adaptive threshold (varied lighting)
+        ColorBased,     // Detect white/yellow text specifically
+        Invert          // For dark text on light background
+    }
+
+    /// <summary>
+    /// Service OCR Strategy Context - Handles preprocessing and delegates to Engine
     /// </summary>
     public class OcrService : IDisposable
     {
-        private TesseractEngine? _engine;
-        private readonly string _tessDataPath;
-        private readonly string _language;
+        private IOcrEngine? _engine;
         private static int _debugCounter = 0;
         private static bool _debugMode = false;
         private static readonly object _debugLock = new object();
+        
+        // Configurable settings
+        public PreprocessMode CurrentMode { get; set; } = PreprocessMode.Auto;
+        public float MinConfidence { get; set; } = 40f;
+        public bool UseMorphology { get; set; } = true;
 
-        public OcrService(string tessDataPath, string language = "eng")
+        public OcrService(IOcrEngine engine)
         {
-            _tessDataPath = tessDataPath;
-            _language = language;
+            _engine = engine;
         }
 
         /// <summary>
@@ -30,57 +44,7 @@ namespace HardSubExtractor.Services
             _debugMode = enable;
             if (enable)
             {
-                _debugCounter = 0; // Reset counter when enabling
-            }
-        }
-
-        /// <summary>
-        /// Khởi tạo Tesseract engine
-        /// </summary>
-        public void Initialize()
-        {
-            if (_engine != null)
-                return;
-
-            if (!Directory.Exists(_tessDataPath))
-            {
-                throw new DirectoryNotFoundException(
-                    $"Tessdata không tồn tại: {_tessDataPath}\n" +
-                    "Hãy tải tessdata từ: https://github.com/tesseract-ocr/tessdata_fast");
-            }
-
-            try
-            {
-                _engine = new TesseractEngine(_tessDataPath, _language, EngineMode.Default);
-                
-                // Cấu hình tối ưu cho OCR subtitle
-                bool isCJK = _language.StartsWith("chi") || _language == "jpn" || _language == "kor";
-                
-                if (!isCJK)
-                {
-                    // Chỉ set whitelist cho Latin languages (English, Vietnamese)
-                    _engine.SetVariable("tessedit_char_whitelist", 
-                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,!?'\"-:;()[] " +
-                        "áàảãạăắằẳẵặâấầ̉ẫậéèẻẽẹêếềểễệíì̉ĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳ̉ỹỵđ" +
-                        "ÁÀẢÃẠĂẮẰẲẴẶÂẤẦ̉ẪẬÉÈẺẼẸÊẾỀỂỄỆÍÌỈĨỊÓÒỎÕỌÔỐỒỔỖỘƠỚỜỞỬỮỰÝỲỶŸỴĐ");
-                }
-                
-                // PSM 7 = Single text line (BEST for subtitles)
-                _engine.SetVariable("tessedit_pageseg_mode", "7");
-                
-                // Improve accuracy for CJK
-                if (isCJK)
-                {
-                    _engine.SetVariable("preserve_interword_spaces", "1");
-                }
-                
-                // Disable dictionary loading for speed
-                _engine.SetVariable("load_system_dawg", "0");
-                _engine.SetVariable("load_freq_dawg", "0");
-            }
-            catch (Exception ex)
-            {
-                throw new Exception($"Không thể khởi tạo Tesseract: {ex.Message}", ex);
+                _debugCounter = 0;
             }
         }
 
@@ -90,14 +54,12 @@ namespace HardSubExtractor.Services
         public string RecognizeText(string imagePath)
         {
             if (_engine == null)
-                Initialize();
+                return string.Empty;
 
             try
             {
-                using var img = Pix.LoadFromFile(imagePath);
-                using var page = _engine!.Process(img);
-                var text = page.GetText();
-                return NormalizeText(text);
+                using var bitmap = new Bitmap(imagePath);
+                return RecognizeText(bitmap);
             }
             catch (Exception ex)
             {
@@ -107,16 +69,15 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// OCR một ảnh từ bitmap (sau khi crop ROI) - VỚI PREPROCESSING
+        /// OCR một ảnh từ bitmap (sau khi crop ROI) - VỚI MULTIPLE PREPROCESSING
         /// </summary>
         public string RecognizeText(Bitmap bitmap)
         {
             if (_engine == null)
-                Initialize();
+                return string.Empty;
 
             try
             {
-                // Save original if debug mode (thread-safe)
                 int currentCounter = 0;
                 if (_debugMode)
                 {
@@ -129,36 +90,18 @@ namespace HardSubExtractor.Services
                     }
                 }
 
-                // PREPROCESSING: Cải thiện ảnh trước khi OCR
-                using var preprocessedBitmap = PreprocessImage(bitmap);
-                
-                // Save preprocessed if debug mode
-                if (_debugMode)
+                // Use Auto mode by default - tries multiple methods
+                if (CurrentMode == PreprocessMode.Auto)
                 {
-                    lock (_debugLock)
-                    {
-                        var debugFolder = Path.Combine(Path.GetTempPath(), "OCR_Debug");
-                        preprocessedBitmap.Save(Path.Combine(debugFolder, $"1_preprocessed_{currentCounter:D4}.png"));
-                    }
+                    var (text, confidence) = RecognizeTextMultiPass(bitmap, currentCounter);
+                    return text;
                 }
-
-                // Convert Bitmap to byte array
-                using var ms = new MemoryStream();
-                preprocessedBitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-                var bytes = ms.ToArray();
-
-                using var img = Pix.LoadFromMemory(bytes);
-                using var page = _engine!.Process(img);
-                var text = page.GetText();
-                
-                // Log confidence if very low (for debugging)
-                var confidence = page.GetMeanConfidence();
-                if (confidence < 40 && _debugMode)
+                else
                 {
-                    Console.WriteLine($"[OCR] Very low confidence: {confidence}% - Text: '{text?.Trim()}'");
+                    using var preprocessed = PreprocessImage(bitmap, CurrentMode);
+                    SaveDebugImage(preprocessed, currentCounter, CurrentMode.ToString());
+                    return RecognizeFromBitmap(preprocessed);
                 }
-                
-                return NormalizeText(text);
             }
             catch (Exception ex)
             {
@@ -168,28 +111,441 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Preprocessing ảnh để tăng độ chính xác OCR - IMPROVED VERSION
+        /// Multi-pass OCR - tries multiple preprocessing methods and returns best result
         /// </summary>
-        private Bitmap PreprocessImage(Bitmap original)
+        private (string text, float confidence) RecognizeTextMultiPass(Bitmap bitmap, int debugCounter)
+        {
+            var results = new List<(string text, float confidence, PreprocessMode mode)>();
+            
+            // Try each preprocessing method
+            var modesToTry = new[] { PreprocessMode.Otsu, PreprocessMode.Adaptive, PreprocessMode.ColorBased };
+            
+            foreach (var mode in modesToTry)
+            {
+                try
+                {
+                    using var preprocessed = PreprocessImage(bitmap, mode);
+                    SaveDebugImage(preprocessed, debugCounter, mode.ToString());
+                    
+                    var (text, conf) = RecognizeWithConfidence(preprocessed);
+                    
+                    if (!string.IsNullOrWhiteSpace(text) && conf >= MinConfidence)
+                    {
+                        results.Add((text, conf, mode));
+                    }
+                }
+                catch (Exception ex)
+                {
+                    if (_debugMode)
+                        Console.WriteLine($"[OCR] {mode} failed: {ex.Message}");
+                }
+            }
+            
+            if (results.Count == 0)
+            {
+                // Fallback: try inverted
+                try
+                {
+                    using var inverted = PreprocessImage(bitmap, PreprocessMode.Invert);
+                    SaveDebugImage(inverted, debugCounter, "Invert");
+                    var (text, conf) = RecognizeWithConfidence(inverted);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        return (text, conf);
+                }
+                catch { }
+                
+                return (string.Empty, 0);
+            }
+            
+            // Return result with highest confidence
+            var best = results.OrderByDescending(r => r.confidence).First();
+            
+            if (_debugMode)
+            {
+                Console.WriteLine($"[OCR] Best: {best.mode} @ {best.confidence:F1}% - '{best.text.Trim().Replace("\n", " ").Substring(0, Math.Min(50, best.text.Length))}'");
+            }
+            
+            return (best.text, best.confidence);
+        }
+
+        /// <summary>
+        /// OCR with confidence score
+        /// </summary>
+        private (string text, float confidence) RecognizeWithConfidence(Bitmap bitmap)
+        {
+            if (_engine == null) return (string.Empty, 0f);
+            var result = _engine.RecognizeAsync(bitmap).GetAwaiter().GetResult();
+            return (NormalizeText(result.text), result.confidence);
+        }
+
+        /// <summary>
+        /// Simple OCR from bitmap
+        /// </summary>
+        private string RecognizeFromBitmap(Bitmap bitmap)
+        {
+            var (text, _) = RecognizeWithConfidence(bitmap);
+            return text;
+        }
+
+        /// <summary>
+        /// Save debug image if debug mode is on
+        /// </summary>
+        private void SaveDebugImage(Bitmap bitmap, int counter, string modeName)
+        {
+            if (!_debugMode || counter == 0) return;
+            
+            lock (_debugLock)
+            {
+                var debugFolder = Path.Combine(Path.GetTempPath(), "OCR_Debug");
+                Directory.CreateDirectory(debugFolder);
+                bitmap.Save(Path.Combine(debugFolder, $"1_{modeName}_{counter:D4}.png"));
+            }
+        }
+
+        /// <summary>
+        /// Main preprocessing dispatcher
+        /// </summary>
+        private Bitmap PreprocessImage(Bitmap original, PreprocessMode mode)
         {
             // Step 1: Upscale if too small
             var scaled = UpscaleImage(original, minWidth: 800);
             
-            // Step 2: Convert to grayscale
-            var grayscale = ConvertToGrayscaleOptimized(scaled);
+            Bitmap processed;
             
-            // Step 3: Increase contrast (moderate)
+            switch (mode)
+            {
+                case PreprocessMode.Otsu:
+                    processed = PreprocessOtsu(scaled);
+                    break;
+                    
+                case PreprocessMode.Adaptive:
+                    processed = PreprocessAdaptive(scaled);
+                    break;
+                    
+                case PreprocessMode.ColorBased:
+                    processed = PreprocessColorBased(scaled);
+                    break;
+                    
+                case PreprocessMode.Invert:
+                    processed = PreprocessInvert(scaled);
+                    break;
+                    
+                default:
+                    processed = PreprocessOtsu(scaled);
+                    break;
+            }
+            
+            // Apply morphology if enabled
+            if (UseMorphology)
+            {
+                var morphed = ApplyMorphology(processed);
+                processed.Dispose();
+                processed = morphed;
+            }
+            
+            // Cleanup
+            if (scaled != original) scaled.Dispose();
+            
+            return processed;
+        }
+
+        /// <summary>
+        /// Otsu preprocessing (original method - best for high contrast)
+        /// </summary>
+        private Bitmap PreprocessOtsu(Bitmap original)
+        {
+            var grayscale = ConvertToGrayscaleOptimized(original);
             var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.8f);
-            
-            // Step 4: Apply Otsu threshold (best for high-contrast subtitles)
             var binarized = ApplyOtsuThresholdOptimized(contrasted);
             
-            // Cleanup intermediate images
-            if (scaled != original) scaled.Dispose();
             grayscale.Dispose();
             contrasted.Dispose();
             
             return binarized;
+        }
+
+        /// <summary>
+        /// Adaptive threshold preprocessing (better for varied lighting)
+        /// </summary>
+        private unsafe Bitmap PreprocessAdaptive(Bitmap original)
+        {
+            var grayscale = ConvertToGrayscaleOptimized(original);
+            
+            // Apply local adaptive thresholding
+            var result = new Bitmap(grayscale.Width, grayscale.Height, PixelFormat.Format24bppRgb);
+            
+            var rect = new Rectangle(0, 0, grayscale.Width, grayscale.Height);
+            var srcData = grayscale.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
+            try
+            {
+                byte* ptrSrc = (byte*)srcData.Scan0;
+                byte* ptrDst = (byte*)dstData.Scan0;
+                
+                int stride = srcData.Stride;
+                int width = grayscale.Width;
+                int height = grayscale.Height;
+                int blockSize = 15; // Local window size
+                int C = 8; // Threshold constant
+                
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        // Calculate local mean
+                        int sum = 0;
+                        int count = 0;
+                        
+                        int yStart = Math.Max(0, y - blockSize / 2);
+                        int yEnd = Math.Min(height - 1, y + blockSize / 2);
+                        int xStart = Math.Max(0, x - blockSize / 2);
+                        int xEnd = Math.Min(width - 1, x + blockSize / 2);
+                        
+                        for (int by = yStart; by <= yEnd; by++)
+                        {
+                            byte* blockRow = ptrSrc + (by * stride);
+                            for (int bx = xStart; bx <= xEnd; bx++)
+                            {
+                                sum += blockRow[bx * 3];
+                                count++;
+                            }
+                        }
+                        
+                        int threshold = (sum / count) - C;
+                        byte* srcRow = ptrSrc + (y * stride);
+                        byte* dstRow = ptrDst + (y * stride);
+                        
+                        byte pixelValue = srcRow[x * 3];
+                        byte outputValue = pixelValue > threshold ? (byte)255 : (byte)0;
+                        
+                        dstRow[x * 3] = outputValue;
+                        dstRow[x * 3 + 1] = outputValue;
+                        dstRow[x * 3 + 2] = outputValue;
+                    }
+                }
+            }
+            finally
+            {
+                grayscale.UnlockBits(srcData);
+                result.UnlockBits(dstData);
+            }
+            
+            grayscale.Dispose();
+            return result;
+        }
+
+        /// <summary>
+        /// Color-based preprocessing (detects white/light text - most subtitles)
+        /// </summary>
+        private unsafe Bitmap PreprocessColorBased(Bitmap original)
+        {
+            var result = new Bitmap(original.Width, original.Height, PixelFormat.Format24bppRgb);
+            
+            var rect = new Rectangle(0, 0, original.Width, original.Height);
+            var srcData = original.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
+            try
+            {
+                byte* ptrSrc = (byte*)srcData.Scan0;
+                byte* ptrDst = (byte*)dstData.Scan0;
+                
+                int stride = srcData.Stride;
+                int width = original.Width;
+                int height = original.Height;
+                
+                // Thresholds for detecting white/light colored text (most subtitles)
+                const int brightnessThreshold = 180; // Pixels brighter than this = text
+                const int saturationThreshold = 60; // Low saturation = white/gray
+                
+                for (int y = 0; y < height; y++)
+                {
+                    byte* srcRow = ptrSrc + (y * stride);
+                    byte* dstRow = ptrDst + (y * stride);
+                    
+                    for (int x = 0; x < width; x++)
+                    {
+                        int idx = x * 3;
+                        int b = srcRow[idx];
+                        int g = srcRow[idx + 1];
+                        int r = srcRow[idx + 2];
+                        
+                        // Calculate brightness (value in HSV)
+                        int maxVal = Math.Max(Math.Max(r, g), b);
+                        int minVal = Math.Min(Math.Min(r, g), b);
+                        
+                        // Calculate saturation
+                        int saturation = maxVal == 0 ? 0 : (maxVal - minVal) * 255 / maxVal;
+                        
+                        // Check if pixel is white/light colored text
+                        bool isWhiteText = maxVal >= brightnessThreshold && saturation <= saturationThreshold;
+                        
+                        // Also check for yellow text (common in Asian subtitles)
+                        // Yellow: high R, high G, low B
+                        bool isYellowText = r >= 200 && g >= 180 && b < 120;
+                        
+                        byte outputValue = (isWhiteText || isYellowText) ? (byte)255 : (byte)0;
+                        
+                        dstRow[idx] = outputValue;
+                        dstRow[idx + 1] = outputValue;
+                        dstRow[idx + 2] = outputValue;
+                    }
+                }
+            }
+            finally
+            {
+                original.UnlockBits(srcData);
+                result.UnlockBits(dstData);
+            }
+            
+            return result;
+        }
+
+        /// <summary>
+        /// Invert preprocessing (for dark text on light background)
+        /// </summary>
+        private Bitmap PreprocessInvert(Bitmap original)
+        {
+            var grayscale = ConvertToGrayscaleOptimized(original);
+            var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.8f);
+            var binarized = ApplyOtsuThresholdOptimized(contrasted);
+            
+            // Invert the result
+            var rect = new Rectangle(0, 0, binarized.Width, binarized.Height);
+            var data = binarized.LockBits(rect, ImageLockMode.ReadWrite, PixelFormat.Format24bppRgb);
+            
+            unsafe
+            {
+                byte* ptr = (byte*)data.Scan0;
+                int bytes = data.Stride * binarized.Height;
+                
+                for (int i = 0; i < bytes; i++)
+                {
+                    ptr[i] = (byte)(255 - ptr[i]);
+                }
+            }
+            
+            binarized.UnlockBits(data);
+            
+            grayscale.Dispose();
+            contrasted.Dispose();
+            
+            return binarized;
+        }
+
+        /// <summary>
+        /// Morphological operations to improve text clarity
+        /// </summary>
+        private unsafe Bitmap ApplyMorphology(Bitmap original)
+        {
+            // Apply dilation to thicken thin text, then slight erosion to clean up
+            var dilated = Dilate(original, 1);
+            var eroded = Erode(dilated, 1);
+            dilated.Dispose();
+            return eroded;
+        }
+
+        private unsafe Bitmap Dilate(Bitmap original, int radius)
+        {
+            var result = new Bitmap(original.Width, original.Height, PixelFormat.Format24bppRgb);
+            
+            var rect = new Rectangle(0, 0, original.Width, original.Height);
+            var srcData = original.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
+            try
+            {
+                byte* ptrSrc = (byte*)srcData.Scan0;
+                byte* ptrDst = (byte*)dstData.Scan0;
+                
+                int stride = srcData.Stride;
+                int width = original.Width;
+                int height = original.Height;
+                
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        byte maxVal = 0;
+                        
+                        for (int dy = -radius; dy <= radius; dy++)
+                        {
+                            for (int dx = -radius; dx <= radius; dx++)
+                            {
+                                int ny = Math.Clamp(y + dy, 0, height - 1);
+                                int nx = Math.Clamp(x + dx, 0, width - 1);
+                                
+                                byte* srcRow = ptrSrc + (ny * stride);
+                                maxVal = Math.Max(maxVal, srcRow[nx * 3]);
+                            }
+                        }
+                        
+                        byte* dstRow = ptrDst + (y * stride);
+                        dstRow[x * 3] = maxVal;
+                        dstRow[x * 3 + 1] = maxVal;
+                        dstRow[x * 3 + 2] = maxVal;
+                    }
+                }
+            }
+            finally
+            {
+                original.UnlockBits(srcData);
+                result.UnlockBits(dstData);
+            }
+            
+            return result;
+        }
+
+        private unsafe Bitmap Erode(Bitmap original, int radius)
+        {
+            var result = new Bitmap(original.Width, original.Height, PixelFormat.Format24bppRgb);
+            
+            var rect = new Rectangle(0, 0, original.Width, original.Height);
+            var srcData = original.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
+            try
+            {
+                byte* ptrSrc = (byte*)srcData.Scan0;
+                byte* ptrDst = (byte*)dstData.Scan0;
+                
+                int stride = srcData.Stride;
+                int width = original.Width;
+                int height = original.Height;
+                
+                for (int y = 0; y < height; y++)
+                {
+                    for (int x = 0; x < width; x++)
+                    {
+                        byte minVal = 255;
+                        
+                        for (int dy = -radius; dy <= radius; dy++)
+                        {
+                            for (int dx = -radius; dx <= radius; dx++)
+                            {
+                                int ny = Math.Clamp(y + dy, 0, height - 1);
+                                int nx = Math.Clamp(x + dx, 0, width - 1);
+                                
+                                byte* srcRow = ptrSrc + (ny * stride);
+                                minVal = Math.Min(minVal, srcRow[nx * 3]);
+                            }
+                        }
+                        
+                        byte* dstRow = ptrDst + (y * stride);
+                        dstRow[x * 3] = minVal;
+                        dstRow[x * 3 + 1] = minVal;
+                        dstRow[x * 3 + 2] = minVal;
+                    }
+                }
+            }
+            finally
+            {
+                original.UnlockBits(srcData);
+                result.UnlockBits(dstData);
+            }
+            
+            return result;
         }
 
         /// <summary>
@@ -469,19 +825,11 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Kiểm tra Tesseract có sẵn không
+        /// Kiểm tra OCR Engine có sẵn không
         /// </summary>
         public bool IsAvailable()
         {
-            try
-            {
-                Initialize();
-                return _engine != null;
-            }
-            catch
-            {
-                return false;
-            }
+            return _engine != null && _engine.IsAvailable();
         }
 
         public void Dispose()

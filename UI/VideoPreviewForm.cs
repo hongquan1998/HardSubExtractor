@@ -22,6 +22,7 @@ namespace HardSubExtractor.UI
         private Button _btnOk = null!;
         private Button _btnCancel = null!;
         private Button _btnResetRoi = null!;
+        private Button _btnAutoDetect = null!;
         private Label _lblRoiInfo = null!;
         
         private string? _currentFramePath;
@@ -191,21 +192,26 @@ namespace HardSubExtractor.UI
             _btnResetRoi = new Button
             {
                 Text = "Reset ROI",
-                Location = new Point(850, 95),
-                Size = new Size(100, 30)
+                Location = new Point(750, 95),
+                Size = new Size(90, 30)
             };
             _btnResetRoi.Click += BtnResetRoi_Click;
             
-            // Instructions
+            _btnAutoDetect = new Button
+            {
+                Text = "🔍 Auto Detect",
+                Location = new Point(850, 95),
+                Size = new Size(110, 30),
+                BackColor = Color.LightBlue,
+                Font = new Font(Font.FontFamily, 9, FontStyle.Bold)
+            };
+            _btnAutoDetect.Click += BtnAutoDetect_Click;
+            
             var lblInstructions = new Label
             {
-                Text = "Huong dan:\n" +
-                       "1. KEO CHUOT tren video de chon vung phu de (ROI)\n" +
-                       "2. Dung Play/Pause/Frame de tim vi tri phu de ro nhat\n" +
-                       "3. Nhap thoi gian (HH:mm:ss) va Go de tua den\n" +
-                       "4. Khi da chon ROI va vi tri phu de, nhan OK",
+                Text = "Huong dan: KEO CHUOT tren video hoac nhan Auto Detect de chon vung phu de",
                 Location = new Point(10, 130),
-                Size = new Size(800, 50),
+                Size = new Size(700, 20),
                 ForeColor = Color.Blue
             };
             
@@ -228,14 +234,13 @@ namespace HardSubExtractor.UI
             };
             _btnCancel.Click += (s, e) => this.DialogResult = DialogResult.Cancel;
             
-            // Add controls
             panelControls.Controls.AddRange(new Control[] {
                 _btnPrevFrame, _btnPlay, _btnPause, _btnNextFrame,
                 _lblTime, _lblPosition,
                 lblSeek, _txtSeekTime, _btnSeekGo,
                 lblFps, _numFps,
                 _seekBar,
-                _lblRoiInfo, _btnResetRoi,
+                _lblRoiInfo, _btnResetRoi, _btnAutoDetect,
                 lblInstructions,
                 _btnOk, _btnCancel
             });
@@ -480,6 +485,79 @@ namespace HardSubExtractor.UI
             _lblRoiInfo.ForeColor = Color.Red;
             _btnOk.Enabled = false;
             _pictureBox.Invalidate();
+        }
+        
+        private void BtnAutoDetect_Click(object? sender, EventArgs e)
+        {
+            if (_pictureBox.Image == null)
+            {
+                MessageBox.Show("Chua load frame nao!", "Error", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            
+            try
+            {
+                this.Cursor = Cursors.WaitCursor;
+                _lblRoiInfo.Text = "Dang detect vung phu de...";
+                _lblRoiInfo.ForeColor = Color.Orange;
+                Application.DoEvents();
+                
+                // Use SubtitleRegionDetector to auto-detect
+                var detector = new Services.SubtitleRegionDetector();
+                
+                // Get current frame as bitmap
+                using var frameBitmap = new System.Drawing.Bitmap(_currentFramePath!);
+                
+                // Detect subtitle region
+                _selectedRoi = detector.DetectSubtitleRegion(frameBitmap);
+                var confidence = detector.LastConfidence;
+                
+                if (_selectedRoi.Width > 10 && _selectedRoi.Height > 10)
+                {
+                    _lblRoiInfo.Text = $"ROI: {_selectedRoi.Width}x{_selectedRoi.Height} at ({_selectedRoi.X},{_selectedRoi.Y}) - Confidence: {confidence:F0}%";
+                    _lblRoiInfo.ForeColor = confidence >= 50 ? Color.Green : Color.Orange;
+                    _btnOk.Enabled = true;
+                    _pictureBox.Invalidate();
+                    
+                    if (confidence < 50)
+                    {
+                        MessageBox.Show(
+                            $"Auto-detect tim thay vung phu de nhung confidence thap ({confidence:F0}%).\n\n" +
+                            "Ban co the:\n" +
+                            "1. Chap nhan va thu OCR\n" +
+                            "2. Keo chuot de chinh sua ROI\n" +
+                            "3. Tua den frame co phu de ro rang hon va detect lai",
+                            "Low Confidence",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Information);
+                    }
+                }
+                else
+                {
+                    _lblRoiInfo.Text = "Auto-detect khong tim thay vung phu de. Hay keo chuot de chon.";
+                    _lblRoiInfo.ForeColor = Color.Red;
+                    _btnOk.Enabled = false;
+                    
+                    MessageBox.Show(
+                        "Khong tim thay vung phu de!\n\n" +
+                        "Thu:\n" +
+                        "1. Tua den frame co phu de ro rang\n" +
+                        "2. Keo chuot de chon vung phu de thu cong",
+                        "Detection Failed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                _lblRoiInfo.Text = $"Loi: {ex.Message}";
+                _lblRoiInfo.ForeColor = Color.Red;
+                MessageBox.Show($"Loi khi detect: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                this.Cursor = Cursors.Default;
+            }
         }
         
         #endregion

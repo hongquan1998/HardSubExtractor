@@ -1,4 +1,6 @@
 ﻿using System.Drawing;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Text;
 using HardSubExtractor.Models;
 using HardSubExtractor.Services;
@@ -23,7 +25,6 @@ namespace HardSubExtractor
         private SubtitleExporter? _subtitleExporter;
 
         private readonly string _tempFolder;
-        private readonly string _tessDataPath;
 
         public Form1()
         {
@@ -31,7 +32,6 @@ namespace HardSubExtractor
             
             // Setup paths
             _tempFolder = Path.Combine(Path.GetTempPath(), "HardSubExtractor");
-            _tessDataPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "tessdata");
 
             // Event handlers
             btnLoadVideo.Click += BtnLoadVideo_Click;
@@ -43,6 +43,7 @@ namespace HardSubExtractor
             btnCreatePrompt.Click += BtnCreatePrompt_Click;
             btnCancel.Click += BtnCancel_Click;
             cmbLanguage.SelectedIndexChanged += CmbLanguage_SelectedIndexChanged;
+            btnOptimizeFps.Click += BtnOptimizeFps_Click;
 
             this.Load += Form1_Load;
         }
@@ -130,50 +131,37 @@ namespace HardSubExtractor
 
         private void InitializeOcrService()
         {
-            if (!Directory.Exists(_tessDataPath))
-            {
-                Log($"ERROR: Tessdata không tìm thấy: {_tessDataPath}");
-                Log("Tạo thư mục tessdata và tải traineddata");
-                
-                Directory.CreateDirectory(_tessDataPath);
-                
-                MessageBox.Show(
-                    $"Tessdata chưa có!\n\n" +
-                    $"Chạy script: powershell -ExecutionPolicy Bypass -File setup-tessdata.ps1\n" +
-                    $"Hoặc tải manual từ: https://github.com/tesseract-ocr/tessdata_fast\n\n" +
-                    $"Đặt vào: {_tessDataPath}",
-                    "Missing Tessdata",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
-            }
-
             try
             {
-                var languageCode = GetLanguageCode(cmbLanguage.SelectedIndex);
-                var languageName = cmbLanguage.SelectedItem?.ToString() ?? "Unknown";
-                
-                Log($"Initializing OCR for: {languageName} ({languageCode})");
-                
-                // Dispose old service nếu có
+                var winLang = GetWindowsLanguageCode(cmbLanguage.SelectedIndex);
+                Log($"Initializing Windows OCR: {winLang}");
+
+                // Dispose old service
                 _ocrService?.Dispose();
-                
-                _ocrService = new OcrService(_tessDataPath, languageCode);
-                _ocrService.Initialize();
-                
-                Log($"✅ Tesseract OK - Language: {languageName}");
+
+                // Create new service with Windows OCR Engine
+                var engine = new WindowsOcrEngine(winLang);
+                _ocrService = new OcrService(engine);
+
+                if (!engine.IsAvailable())
+                {
+                    Log($"⚠️ WARNING: Windows OCR language '{winLang}' not installed!");
+                    MessageBox.Show(
+                        $"Windows OCR chưa hỗ trợ ngôn ngữ: {winLang}\n\n" +
+                        $"Vui lòng cài đặt Language Pack trong Settings của Windows:\n" +
+                        $"Settings > Time & Language > Language > Add a language",
+                        "Missing Language Pack",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning);
+                }
+                else
+                {
+                    Log($"✅ Windows OCR initialized: {winLang}");
+                }
             }
             catch (Exception ex)
             {
-                Log($"ERROR: Tesseract initialization failed: {ex.Message}");
-                MessageBox.Show(
-                    $"Không thể khởi tạo Tesseract!\n\n" +
-                    $"Language: {cmbLanguage.SelectedItem}\n" +
-                    $"Error: {ex.Message}\n\n" +
-                    $"Hãy chạy: powershell -ExecutionPolicy Bypass -File setup-tessdata.ps1",
-                    "Tesseract Error",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Error);
+                Log($"ERROR initializing OCR: {ex.Message}");
             }
         }
 
@@ -188,6 +176,19 @@ namespace HardSubExtractor
                 4 => "kor",          // 한국어
                 5 => "vie",          // Tiếng Việt
                 _ => "chi_sim"       // Default: Chinese Simplified
+            };
+        }
+
+        private PreprocessMode GetPreprocessMode(int selectedIndex)
+        {
+            return selectedIndex switch
+            {
+                0 => PreprocessMode.Auto,       // Auto (Recommended)
+                1 => PreprocessMode.Otsu,       // High Contrast
+                2 => PreprocessMode.Adaptive,   // Adaptive
+                3 => PreprocessMode.ColorBased, // Color Detection
+                4 => PreprocessMode.Invert,     // Invert
+                _ => PreprocessMode.Auto
             };
         }
 
@@ -208,7 +209,7 @@ namespace HardSubExtractor
             }
         }
 
-        private async void BtnSelectRoi_Click(object? sender, EventArgs e)
+        private void BtnSelectRoi_Click(object? sender, EventArgs e)
         {
             if (string.IsNullOrEmpty(_videoPath))
                 return;
@@ -249,7 +250,7 @@ namespace HardSubExtractor
 
             if (_ocrService == null)
             {
-                MessageBox.Show("Tesseract is not initialized!", "Error", 
+                MessageBox.Show("OCR Engine is not initialized!", "Error", 
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
@@ -387,33 +388,48 @@ namespace HardSubExtractor
                 var emptyResults = 0;
                 var startTime = DateTime.Now;
 
-                // Get language code once
+                // Get language code and preprocess mode
                 var languageCode = GetLanguageCode(cmbLanguage.SelectedIndex);
+                var preprocessMode = GetPreprocessMode(cmbPreprocessMode.SelectedIndex);
+                Log($"Using preprocess mode: {preprocessMode}");
 
-                // Parallel OCR with user-selected concurrency
+                // Create Engine (Windows Media OCR) - Shared instance is thread-safe
+                var winLangCode = GetWindowsLanguageCode(cmbLanguage.SelectedIndex);
+                Log($"Initializing Windows OCR for {winLangCode}...");
+                
+                using var engine = new WindowsOcrEngine(winLangCode);
+                
+                if (!engine.IsAvailable())
+                {
+                    MessageBox.Show(
+                        $"Windows OCR language data for '{winLangCode}' is not installed!\n\n" +
+                        "Please install the language pack in Windows Settings:\n" +
+                        "Settings -> Time & Language -> Language -> Add a language",
+                        "Language Pack Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+
+                // Create Service - Shared instance
+                using var ocrService = new OcrService(engine);
+                ocrService.CurrentMode = preprocessMode;
+                
+                // Parallel Options
                 var parallelOptions = new ParallelOptions
                 {
-                    MaxDegreeOfParallelism = threadCount, // Use user-selected thread count
-                    CancellationToken = _cancellationTokenSource.Token
+                     MaxDegreeOfParallelism = threadCount,
+                     CancellationToken = _cancellationTokenSource.Token
                 };
 
                 try
                 {
                     await Task.Run(() =>
                     {
-                        Parallel.ForEach(_extractedFrames, parallelOptions, () =>
-                        {
-                            // Thread-local OcrService - Each thread gets its own Tesseract engine!
-                            var ocrService = new OcrService(_tessDataPath, languageCode);
-                            ocrService.Initialize();
-                            return ocrService;
-                        },
-                        (frame, loopState, threadLocalOcr) =>
+                        Parallel.ForEach(_extractedFrames, parallelOptions, (frame, loopState) =>
                         {
                             if (_cancellationTokenSource.Token.IsCancellationRequested)
                             {
                                 loopState.Stop();
-                                return threadLocalOcr;
+                                return;
                             }
 
                             try
@@ -421,9 +437,10 @@ namespace HardSubExtractor
                                 // Crop ROI
                                 using var croppedBitmap = OcrService.CropImage(frame.FilePath, _selectedRoi);
                                 
-                                // OCR with thread-local instance
-                                var text = threadLocalOcr.RecognizeText(croppedBitmap);
-                                ocrResults[frame.Timestamp] = text;
+                                // OCR with shared instance (Sync wrapper)
+                                var text = ocrService.RecognizeText(croppedBitmap);
+                                
+                                ocrResults.TryAdd(frame.Timestamp, text); // Use TryAdd for ConcurrentDictionary
                                 
                                 // Track empty results
                                 if (string.IsNullOrWhiteSpace(text))
@@ -434,13 +451,13 @@ namespace HardSubExtractor
                                 // Update progress (thread-safe)
                                 var count = Interlocked.Increment(ref processedCount);
                                 
-                                // Update UI less frequently (every 2% instead of 5%)
+                                // Update UI less frequently (every 2%)
                                 if (count % Math.Max(1, _extractedFrames.Count / 50) == 0)
                                 {
                                     var percent = (int)((count / (float)_extractedFrames.Count) * 100);
                                     var elapsed = DateTime.Now - startTime;
                                     var framesPerSecond = count / elapsed.TotalSeconds;
-                                    var remaining = TimeSpan.FromSeconds((_extractedFrames.Count - count) / framesPerSecond);
+                                    var remaining = TimeSpan.FromSeconds((_extractedFrames.Count - count) / (framesPerSecond + 0.001));
                                     
                                     this.Invoke(() =>
                                     {
@@ -453,13 +470,6 @@ namespace HardSubExtractor
                             {
                                 Log($"ERROR processing frame {frame.Timestamp}: {ex.Message}");
                             }
-
-                            return threadLocalOcr;
-                        },
-                        (threadLocalOcr) =>
-                        {
-                            // Cleanup: Dispose thread-local OcrService
-                            threadLocalOcr?.Dispose();
                         });
                     }, _cancellationTokenSource.Token);
                 }
@@ -580,40 +590,117 @@ namespace HardSubExtractor
                 MessageBoxIcon.Information);
         }
 
-        private void BtnFixTime_Click(object? sender, EventArgs e)
+        private async void BtnFixTime_Click(object? sender, EventArgs e)
         {
             if (_subtitles.Count == 0)
                 return;
 
-            Log("Fixing subtitle timing...");
-            SetStatus("Fixing time...");
+            // Ask for Deep Refinement
+            var result = MessageBox.Show(
+                "Bạn có muốn chạy 'Deep Timing Refinement' (Chính xác từng frame)?\n\n" +
+                "Tính năng này sẽ quét lại video tại điểm bắt đầu/kết thúc cushion để tìm timing chính xác nhất.\n" +
+                "⚠️ LƯU Ý: Rất chậm (khoảng 0.5s mỗi subtitle)!\n\n" +
+                "Chọn 'No' để chỉ fix logic thông thường (Nhanh).",
+                "Deep Timing Refinement",
+                MessageBoxButtons.YesNoCancel,
+                MessageBoxIcon.Question);
 
-            var issues = _subtitleTimeFixer!.DetectTimeIssues(_subtitles);
-            
-            if (issues.Count > 0)
+            if (result == DialogResult.Cancel)
+                return;
+
+            SetButtonsEnabled(false);
+            progressBar.Value = 0;
+            progressBar.Maximum = 100;
+
+            try
             {
-                Log($"Found {issues.Count} time issues");
-                foreach (var issue in issues.Take(10))
+                if (result == DialogResult.Yes)
                 {
-                    Log($"  - {issue}");
+                    Log("Running Deep Timing Refinement (this may take a while)...");
+                    SetStatus("Refining timing...");
+                    
+                    var progress = new Progress<int>(p => progressBar.Value = p);
+                    
+                    _subtitles = await Task.Run(async () => 
+                        await _subtitleTimeFixer!.RefineTimingAsync(_subtitles, _videoPath!, _tempFolder, _selectedRoi, progress));
+                        
+                    Log("Deep refinement completed.");
                 }
+
+                Log("Applying logical time fixes...");
+                SetStatus("Fixing logic...");
+                _subtitles = _subtitleTimeFixer!.AutoFix(_subtitles);
+
+                DisplaySubtitles();
+
+                var stats = _subtitleTimeFixer.GetTimeStatistics(_subtitles);
+                Log($"Time fixed: {stats}");
+                SetStatus("Time fixed");
+
+                MessageBox.Show(
+                    $"Time fixed successfully!\n\n" +
+                    $"Stats: {stats}",
+                    "Fixed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Log($"ERROR fixing time: {ex.Message}");
+                MessageBox.Show($"Error: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                SetButtonsEnabled(true);
+                progressBar.Value = 0;
+            }
+        }
+
+        private async void BtnOptimizeFps_Click(object? sender, EventArgs e)
+        {
+            if (string.IsNullOrEmpty(_videoPath))
+            {
+                MessageBox.Show("Vui lòng mở video trước!", "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
             }
 
-            _subtitles = _subtitleTimeFixer.AutoFix(_subtitles);
+            if (_selectedRoi.IsEmpty)
+            {
+                MessageBox.Show("Vui lòng chọn vùng phụ đề (ROI) trước!\n(Click nút 'Preview & Select ROI')", 
+                    "Warning", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
 
-            DisplaySubtitles();
+            try
+            {
+                SetButtonsEnabled(false);
+                Log("Analyzing video complexity for optimal FPS...");
+                SetStatus("Analyzing video...");
+                this.Cursor = Cursors.WaitCursor;
 
-            var stats = _subtitleTimeFixer.GetTimeStatistics(_subtitles);
-            Log($"Time fixed: {stats}");
-            SetStatus("Time fixed");
-
-            MessageBox.Show(
-                $"Time fixed!\n\n" +
-                $"Issues found: {issues.Count}\n" +
-                $"{stats}",
-                "Fixed",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information);
+                var optimalFps = await _subtitleTimeFixer!.EstimateOptimalFpsAsync(_videoPath, _tempFolder, _selectedRoi);
+                
+                numFps.Value = optimalFps;
+                Log($"Analysis complete. Optimal FPS: {optimalFps}");
+                
+                MessageBox.Show(
+                    $"Video Analysis Complete!\n\n" +
+                    $"Based on subtitle change rate, suggested FPS is: {optimalFps}\n" +
+                    $"(Updated automatically)",
+                    "Optimization",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                Log($"Error analyzing FPS: {ex.Message}");
+            }
+            finally
+            {
+                SetButtonsEnabled(true);
+                SetStatus("Ready");
+                this.Cursor = Cursors.Default;
+            }
         }
 
         private void BtnExportSrt_Click(object? sender, EventArgs e)
@@ -1033,6 +1120,19 @@ namespace HardSubExtractor
             {
                 // Non-critical, ignore on close
             }
+        }
+        private string GetWindowsLanguageCode(int index)
+        {
+            return index switch
+            {
+                0 => "zh-Hans", // Chinese Simplified
+                1 => "zh-Hant", // Chinese Traditional
+                2 => "en-US",   // English
+                3 => "ja-JP",   // Japanese
+                4 => "ko-KR",   // Korean
+                5 => "vi-VN",   // Vietnamese
+                _ => "en-US"
+            };
         }
     }
 }

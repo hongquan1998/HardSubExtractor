@@ -1,14 +1,16 @@
 ﻿using HardSubExtractor.Models;
+using System.Drawing;
+using System.Drawing.Imaging;
 
 namespace HardSubExtractor.Services
 {
     /// <summary>
-    /// Service fix th?i gian subtitle (shift, overlap, duration)
+    /// Service fix thời gian subtitle (shift, overlap, duration)
     /// </summary>
     public class SubtitleTimeFixer
     {
         /// <summary>
-        /// Shift toàn b? subtitle ± milliseconds
+        /// Shift toàn bộ subtitle ± milliseconds
         /// </summary>
         public List<SubtitleItem> ShiftTime(List<SubtitleItem> subtitles, long shiftMs)
         {
@@ -21,8 +23,8 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Fix overlap gi?a các subtitle
-        /// N?u subtitle A k?t thúc sau khi subtitle B b?t ??u, c?t A ng?n l?i
+        /// Fix overlap giữa các subtitle
+        /// Nếu subtitle A kết thúc sau khi subtitle B bắt đầu, cắt A ngắn lại
         /// </summary>
         public List<SubtitleItem> FixOverlap(List<SubtitleItem> subtitles, long minGap = 0)
         {
@@ -36,13 +38,13 @@ namespace HardSubExtractor.Services
                 var current = sorted[i];
                 var next = sorted[i + 1];
 
-                // N?u current overlap v?i next
+                // Nếu current overlap với next
                 if (current.EndTime > next.StartTime)
                 {
-                    // C?t current ?? k?t thúc tr??c next
+                    // Cắt current để kết thúc trước next
                     current.EndTime = next.StartTime - minGap;
 
-                    // ??m b?o duration t?i thi?u 100ms
+                    // Đảm bảo duration tối thiểu 100ms
                     if (current.EndTime <= current.StartTime)
                     {
                         current.EndTime = current.StartTime + 100;
@@ -54,8 +56,8 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Auto kéo endTime n?u subtitle ??i ch?m
-        /// Kéo dài subtitle n?u gap v?i subtitle k? ti?p quá l?n
+        /// Auto kéo endTime nếu subtitle đổi chậm
+        /// Kéo dài subtitle nếu gap với subtitle kế tiếp quá lớn
         /// </summary>
         public List<SubtitleItem> ExtendDuration(List<SubtitleItem> subtitles, long maxGap = 1000)
         {
@@ -71,10 +73,10 @@ namespace HardSubExtractor.Services
 
                 var gap = next.StartTime - current.EndTime;
 
-                // N?u gap quá l?n, kéo dài current
+                // Nếu gap quá lớn, kéo dài current
                 if (gap > maxGap)
                 {
-                    current.EndTime = next.StartTime - 50; // gi? 50ms gap
+                    current.EndTime = next.StartTime - 50; // giữ 50ms gap
                 }
             }
 
@@ -82,7 +84,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Set minimum duration cho t?t c? subtitle
+        /// Set minimum duration cho tất cả subtitle
         /// </summary>
         public List<SubtitleItem> SetMinimumDuration(List<SubtitleItem> subtitles, long minDuration = 500)
         {
@@ -97,7 +99,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Set maximum duration cho t?t c? subtitle
+        /// Set maximum duration cho tất cả subtitle
         /// </summary>
         public List<SubtitleItem> SetMaximumDuration(List<SubtitleItem> subtitles, long maxDuration = 10000)
         {
@@ -112,7 +114,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Fix gap gi?a các subtitle (thêm/b?t th?i gian)
+        /// Fix gap giữa các subtitle (thêm/bớt thời gian)
         /// </summary>
         public List<SubtitleItem> AdjustGaps(List<SubtitleItem> subtitles, long targetGap = 100)
         {
@@ -128,12 +130,12 @@ namespace HardSubExtractor.Services
 
                 var currentGap = next.StartTime - current.EndTime;
 
-                // N?u gap khác target, adjust
+                // Nếu gap khác target, adjust
                 if (currentGap != targetGap)
                 {
                     current.EndTime = next.StartTime - targetGap;
 
-                    // ??m b?o duration t?i thi?u
+                    // Đảm bảo duration tối thiểu
                     if (current.EndTime <= current.StartTime)
                     {
                         current.EndTime = current.StartTime + 100;
@@ -146,7 +148,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Phát hi?n các subtitle có v?n ?? v? th?i gian
+        /// Phát hiện các subtitle có vấn đề về thời gian
         /// </summary>
         public List<TimeIssue> DetectTimeIssues(List<SubtitleItem> subtitles)
         {
@@ -165,7 +167,7 @@ namespace HardSubExtractor.Services
                     });
                 }
 
-                // Subtitle quá ng?n (< 200ms)
+                // Subtitle quá ngắn (< 200ms)
                 if (sub.Duration < 200)
                 {
                     issues.Add(new TimeIssue
@@ -210,29 +212,29 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Auto fix t?t c? v?n ?? v? th?i gian
+        /// Auto fix tất cả vấn đề về thời gian
         /// </summary>
         public List<SubtitleItem> AutoFix(List<SubtitleItem> subtitles)
         {
             var fixedSubtitles = new List<SubtitleItem>(subtitles);
 
-            // B??c 1: Set minimum duration
+            // Bước 1: Set minimum duration
             fixedSubtitles = SetMinimumDuration(fixedSubtitles, 500);
 
-            // B??c 2: Set maximum duration
+            // Bước 2: Set maximum duration
             fixedSubtitles = SetMaximumDuration(fixedSubtitles, 10000);
 
-            // B??c 3: Fix overlap
+            // Bước 3: Fix overlap
             fixedSubtitles = FixOverlap(fixedSubtitles, minGap: 50);
 
-            // B??c 4: Extend duration n?u gap quá l?n
+            // Bước 4: Extend duration nếu gap quá lớn
             fixedSubtitles = ExtendDuration(fixedSubtitles, maxGap: 2000);
 
             return fixedSubtitles;
         }
 
         /// <summary>
-        /// L?y th?ng kê v? th?i gian
+        /// Lấy thống kê về thời gian
         /// </summary>
         public TimeStatistics GetTimeStatistics(List<SubtitleItem> subtitles)
         {
@@ -260,10 +262,192 @@ namespace HardSubExtractor.Services
                 OverlapCount = gaps.Count(g => g < 0)
             };
         }
+
+        /// <summary>
+        /// Refine timing using video analysis (Extract frames -> Check text presence)
+        /// Precision: 100ms (10 FPS)
+        /// </summary>
+        public async Task<List<SubtitleItem>> RefineTimingAsync(
+            List<SubtitleItem> subtitles, 
+            string videoPath, 
+            string tempFolder,
+            Rectangle roi,
+            IProgress<int>? progress = null)
+        {
+            if (subtitles.Count == 0 || !File.Exists(videoPath))
+                return subtitles;
+
+            var frameExtractor = new FrameExtractor();
+            var regionDetector = new SubtitleRegionDetector();
+            var refinedList = new List<SubtitleItem>();
+
+            // Ensure temp folder exists
+            var refineFolder = Path.Combine(tempFolder, "refine");
+            if (!Directory.Exists(refineFolder))
+                Directory.CreateDirectory(refineFolder);
+
+            int processed = 0;
+            int total = subtitles.Count;
+
+            foreach (var sub in subtitles)
+            {
+                var refinedSub = new SubtitleItem 
+                { 
+                    Index = sub.Index,
+                    Text = sub.Text,
+                    StartTime = sub.StartTime,
+                    EndTime = sub.EndTime
+                };
+
+                try 
+                {
+                    // 1. Refine Start Time
+                    // Extract frames around start time: [Start-500ms, Start+200ms]
+                    var startContext = TimeSpan.FromMilliseconds(Math.Max(0, sub.StartTime - 800));
+                    var endContext = TimeSpan.FromMilliseconds(sub.StartTime + 400);
+                    
+                    var startFrames = await frameExtractor.ExtractFramesInRangeAsync(
+                        videoPath, refineFolder, startContext, endContext, fps: 10);
+                    
+                    // Find the first frame that has text
+                    long bestStart = -1;
+                    foreach (var frame in startFrames)
+                    {
+                        using var bmp = new Bitmap(frame.FilePath);
+                        
+                        // Crop ROI
+                        using var cropped = OcrService.CropImage(frame.FilePath, roi);
+                        
+                        // Check if text is present
+                        if (regionDetector.HasSubtitleLikely(cropped))
+                        {
+                            bestStart = frame.Timestamp;
+                            break;
+                        }
+                    }
+                    
+                    if (bestStart != -1)
+                        refinedSub.StartTime = Math.Max(0, bestStart); // Adjust to detected start
+
+                    // 2. Refine End Time
+                    // Extract frames around end time: [End-200ms, End+800ms]
+                    var startEndContext = TimeSpan.FromMilliseconds(Math.Max(0, sub.EndTime - 400));
+                    var endEndContext = TimeSpan.FromMilliseconds(sub.EndTime + 800);
+                    
+                    var endFrames = await frameExtractor.ExtractFramesInRangeAsync(
+                        videoPath, refineFolder, startEndContext, endEndContext, fps: 10);
+                        
+                    // Find the first frame where text disappears
+                    long bestEnd = -1;
+                    bool textWasPresent = true;
+                    
+                    foreach (var frame in endFrames)
+                    {
+                        using var bmp = new Bitmap(frame.FilePath);
+                        using var cropped = OcrService.CropImage(frame.FilePath, roi);
+                        
+                        bool hasText = regionDetector.HasSubtitleLikely(cropped);
+                        
+                        if (!hasText && textWasPresent)
+                        {
+                            bestEnd = frame.Timestamp;
+                            break;
+                        }
+                        textWasPresent = hasText;
+                    }
+                    
+                    if (bestEnd != -1)
+                        refinedSub.EndTime = bestEnd;
+                        
+                    // Cleanup frames
+                    foreach(var f in startFrames) try { File.Delete(f.FilePath); } catch {}
+                    foreach(var f in endFrames) try { File.Delete(f.FilePath); } catch {}
+                }
+                catch 
+                {
+                    // Keep original if error
+                }
+
+                refinedList.Add(refinedSub);
+                
+                processed++;
+                progress?.Report((int)((double)processed / total * 100));
+            }
+
+            try { Directory.Delete(refineFolder, true); } catch {}
+            
+            return refinedList;
+        }
+
+        /// <summary>
+        /// Analyze video to estimate optimal FPS
+        /// </summary>
+        public async Task<int> EstimateOptimalFpsAsync(
+            string videoPath, 
+            string tempFolder,
+            Rectangle roi)
+        {
+            try
+            {
+                var frameExtractor = new FrameExtractor();
+                var regionDetector = new SubtitleRegionDetector();
+                
+                // Extract 10 seconds from middle of video
+                // We need to know duration first, but let's just take regular intervals
+                // Actually, extracting 1 minute at 1 FPS is fast
+                var sampleFolder = Path.Combine(tempFolder, "fps_sample");
+                
+                // Extract 00:05:00 to 00:06:00 (1 minute) at 4 FPS
+                // Assume video is at least that long. If not, take detected duration.
+                
+                var frames = await frameExtractor.ExtractFramesAsync(videoPath, sampleFolder, fps: 4);
+                if (frames.Count == 0) return 4;
+                
+                // Sample middle 100 frames
+                var midIndex = frames.Count / 2;
+                var sampleCount = Math.Min(frames.Count, 100);
+                var startIdx = Math.Max(0, midIndex - sampleCount / 2);
+                var subset = frames.Skip(startIdx).Take(sampleCount).ToList();
+                
+                int rapidChanges = 0;
+                bool wasText = false;
+                
+                foreach (var frame in subset)
+                {
+                    using var bmp = new Bitmap(frame.FilePath);
+                    using var cropped = OcrService.CropImage(frame.FilePath, roi);
+                    bool hasText = regionDetector.HasSubtitleLikely(cropped);
+                    
+                    if (hasText != wasText)
+                    {
+                        rapidChanges++;
+                    }
+                    wasText = hasText;
+                }
+                
+                // Cleanup
+                try { Directory.Delete(sampleFolder, true); } catch {}
+                
+                // Calculate density
+                // 4 FPS = 250ms per frame
+                // If many changes, suggest higher FPS
+                // rapidChanges per 100 frames (25 seconds)
+                // If > 10 changes (every 2.5s), standard rate
+                // If > 20 changes (every 1.25s), fast rate
+                
+                if (rapidChanges > 25) return 6; // Very fast
+                if (rapidChanges > 15) return 4; // Normal
+                return 2; // Slow
+            }
+            catch
+            {
+                return 4; // Default
+            }
+        }
     }
 
     /// <summary>
-    /// V?n ?? v? th?i gian
+    /// Vấn đề về thời gian
     /// </summary>
     public class TimeIssue
     {
@@ -287,7 +471,7 @@ namespace HardSubExtractor.Services
     }
 
     /// <summary>
-    /// Th?ng kê th?i gian
+    /// Thống kê thời gian
     /// </summary>
     public class TimeStatistics
     {

@@ -2,13 +2,13 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     
-    <!-- Self-contained but NOT single file (to preserve ffmpeg/tessdata) -->
+    <!-- Self-contained but NOT single file (to preserve ffmpeg) -->
     <PublishSingleFile>false</PublishSingleFile>
     <SelfContained>true</SelfContained>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -22,10 +22,6 @@
     <Copyright>Copyright © 2024</Copyright>
   </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="Tesseract" Version="5.2.0" />
-  </ItemGroup>
-
   <!-- Include FFmpeg binaries -->
   <ItemGroup>
     <None Include="ffmpeg\bin\*.exe">
@@ -34,13 +30,7 @@
     </None>
   </ItemGroup>
 
-  <!-- Include Tessdata files -->
-  <ItemGroup>
-    <None Include="tessdata\*.traineddata">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>tessdata\%(Filename)%(Extension)</Link>
-    </None>
-  </ItemGroup>
+
   <ItemGroup>
     <Content Include="bin\HardSubExtractor-v1.3.0-Portable\README.txt" />
   </ItemGroup>

@@ -81,23 +81,32 @@
 
             var lblFpsInfo = new Label
             {
-                Text = "(⚠️ Use 4+ for best results)",
-                Location = new Point(170, 55),
+                Text = "(Safe: 4+)",
+                Location = new Point(245, 55),
                 AutoSize = true,
-                ForeColor = Color.DarkOrange  // Warning color
+                ForeColor = Color.Gray
+            };
+
+            btnOptimizeFps = new Button
+            {
+                Text = "⚡ Auto",
+                Location = new Point(170, 52),
+                Width = 70,
+                Height = 25,
+                BackColor = Color.LightYellow
             };
 
             var lblLanguage = new Label
             {
                 Text = "Language:",
-                Location = new Point(280, 55),
+                Location = new Point(320, 55),
                 AutoSize = true
             };
 
             cmbLanguage = new ComboBox
             {
-                Location = new Point(360, 52),
-                Width = 180,
+                Location = new Point(400, 52),
+                Width = 140,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
 
@@ -110,25 +119,37 @@
             cmbLanguage.Items.Add("Tiếng Việt (Vietnamese)");
             cmbLanguage.SelectedIndex = 0; // Mặc định tiếng Trung giản thể
 
-            var lblLanguageInfo = new Label
+            var lblPreprocess = new Label
             {
-                Text = "OCR language",
+                Text = "Preprocess:",
                 Location = new Point(550, 55),
-                AutoSize = true,
-                ForeColor = Color.Gray
+                AutoSize = true
             };
+
+            cmbPreprocessMode = new ComboBox
+            {
+                Location = new Point(620, 52),
+                Width = 130,
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            cmbPreprocessMode.Items.Add("Auto (Recommended)");
+            cmbPreprocessMode.Items.Add("High Contrast");
+            cmbPreprocessMode.Items.Add("Adaptive");
+            cmbPreprocessMode.Items.Add("Color Detection");
+            cmbPreprocessMode.Items.Add("Invert");
+            cmbPreprocessMode.SelectedIndex = 0;
 
             var lblThreads = new Label
             {
                 Text = "Threads:",
-                Location = new Point(640, 55),
+                Location = new Point(760, 55),
                 AutoSize = true
             };
 
             numThreads = new NumericUpDown
             {
-                Location = new Point(700, 52),
-                Width = 60,
+                Location = new Point(820, 52),
+                Width = 50,
                 Minimum = 1,
                 Maximum = Environment.ProcessorCount,
                 Value = Math.Max(1, Environment.ProcessorCount - 1)
@@ -137,24 +158,24 @@
             var lblThreadsInfo = new Label
             {
                 Text = $"(max: {Environment.ProcessorCount})",
-                Location = new Point(770, 55),
+                Location = new Point(875, 55),
                 AutoSize = true,
                 ForeColor = Color.Gray
             };
 
             chkDebugMode = new CheckBox
             {
-                Text = "Debug OCR (save images)",
-                Location = new Point(900, 54),
+                Text = "Debug OCR",
+                Location = new Point(960, 54),
                 AutoSize = true,
                 ForeColor = Color.DarkRed
             };
 
             btnOpenDebugFolder = new Button
             {
-                Text = "📁 Open Debug Folder",
-                Location = new Point(1030, 52),
-                Width = 140,
+                Text = "📁 Debug Folder",
+                Location = new Point(1050, 52),
+                Width = 110,
                 Height = 25,
                 Font = new Font(Font.FontFamily, 8, FontStyle.Regular)
             };
@@ -163,9 +184,9 @@
             panelTop.Controls.AddRange(new Control[] { 
                 lblVideo, txtVideoPath, btnLoadVideo, 
                 lblFps, numFps, lblFpsInfo,
-                lblLanguage, cmbLanguage, lblLanguageInfo,
+                lblLanguage, cmbLanguage, lblPreprocess, cmbPreprocessMode,
                 lblThreads, numThreads, lblThreadsInfo,
-                chkDebugMode, btnOpenDebugFolder
+                chkDebugMode, btnOpenDebugFolder, btnOptimizeFps
             });
 
             // Panel Center - Buttons
@@ -351,6 +372,7 @@
         private ComboBox cmbLanguage = null!;
         private CheckBox chkDebugMode = null!;
         private Button btnOpenDebugFolder = null!;
+        private ComboBox cmbPreprocessMode = null!;
         private Button btnSelectRoi = null!;
         private Button btnStartOcr = null!;
         private Button btnCleanSubtitle = null!;
@@ -362,5 +384,6 @@
         private ProgressBar progressBar = null!;
         private DataGridView dgvSubtitles = null!;
         private TextBox txtLog = null!;
+        private Button btnOptimizeFps = null!;
     }
 }

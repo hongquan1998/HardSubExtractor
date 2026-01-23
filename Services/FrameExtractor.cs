@@ -213,6 +213,70 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
+        /// Extract frames for a specific time range at high FPS (for precise timing)
+        /// </summary>
+        public async Task<List<FrameInfo>> ExtractFramesInRangeAsync(
+            string videoPath,
+            string outputFolder,
+            TimeSpan start,
+            TimeSpan end,
+            int fps = 10)
+        {
+            if (!File.Exists(videoPath))
+                throw new FileNotFoundException("Video not found", videoPath);
+
+            if (!Directory.Exists(outputFolder))
+                Directory.CreateDirectory(outputFolder);
+
+            // ffmpeg -ss 00:00:10 -to 00:00:15 -i video.mp4 -vf fps=10 frame_%03d.png
+            string startStr = start.ToString(@"hh\:mm\:ss\.fff");
+            string endStr = end.ToString(@"hh\:mm\:ss\.fff");
+            
+            // Output pattern
+            var outputPattern = Path.Combine(outputFolder, "refine_%03d.png");
+            
+            // Use -ss before -i for faster seeking
+            var arguments = $"-ss {startStr} -to {endStr} -i \"{videoPath}\" -vf fps={fps} \"{outputPattern}\"";
+
+            _ffmpegProcess = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = _ffmpegPath,
+                    Arguments = arguments,
+                    UseShellExecute = false,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                }
+            };
+
+            await Task.Run(() => 
+            {
+                _ffmpegProcess.Start();
+                _ffmpegProcess.WaitForExit();
+            });
+
+            // Collect results
+            var frames = new List<FrameInfo>();
+            var files = Directory.GetFiles(outputFolder, "refine_*.png").OrderBy(f => f).ToList();
+            
+            double interval = 1000.0 / fps;
+            long startMs = (long)start.TotalMilliseconds;
+
+            for (int i = 0; i < files.Count; i++)
+            {
+                frames.Add(new FrameInfo
+                {
+                    FrameNumber = i,
+                    FilePath = files[i],
+                    Timestamp = startMs + (long)(i * interval)
+                });
+            }
+
+            return frames;
+        }
+
+        /// <summary>
         /// L?y th?i l??ng video (giây)
         /// </summary>
         private async Task<double> GetVideoDurationAsync(string videoPath)
