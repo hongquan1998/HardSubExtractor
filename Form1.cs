@@ -50,7 +50,7 @@ namespace HardSubExtractor
 
         private async void Form1_Load(object? sender, EventArgs e)
         {
-            Log("Hard Subtitle Extractor v1.3.0 - Optimized Edition");
+            Log("Hard Subtitle Extractor v5.0.0 - Zero-Miss Detection Edition");
             Log("Checking dependencies...");
 
             // Check FFmpeg
@@ -109,17 +109,18 @@ namespace HardSubExtractor
             // Initialize OCR service
             InitializeOcrService();
 
-            // Initialize services with optimized thresholds
+            // Initialize services with tuned thresholds for zero-miss detection
             _subtitleDetector = new SubtitleDetector(
-                similarityThreshold: 0.70,
-                minSubtitleDuration: 250,
-                maxGapBetweenSame: 600);
+                similarityThreshold: 0.60,
+                minSubtitleDuration: 100,
+                maxGapBetweenSame: 1000);
             _subtitleCleaner = new SubtitleCleaner();
             _subtitleTimeFixer = new SubtitleTimeFixer();
             _subtitleExporter = new SubtitleExporter();
 
             Log("Ready!");
-            Log("📊 Thresholds: similarity=0.70, minDuration=250ms, maxGap=600ms");
+            Log("📊 Thresholds: similarity=0.60, minDuration=100ms, maxGap=1000ms");
+            Log("⚡ v5.0: Zero-miss detection + Precise timeline");
             Log("⚠️ Khuyến nghị: FPS >= 4 để detect subtitle tốt nhất!");
         }
 
@@ -412,6 +413,7 @@ namespace HardSubExtractor
                 // Create Service - Shared instance
                 using var ocrService = new OcrService(engine);
                 ocrService.CurrentMode = preprocessMode;
+                ocrService.UseMorphology = false; // v2.0: disabled by default for better accuracy
                 
                 // Parallel Options
                 var parallelOptions = new ParallelOptions

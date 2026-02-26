@@ -3,12 +3,13 @@
 namespace HardSubExtractor.Services
 {
     /// <summary>
-    /// Service làm s?ch và chu?n hóa subtitle
+    /// Service làm sạch và chuẩn hóa subtitle - v2.0
+    /// Enhanced with better OCR noise removal and CJK support
     /// </summary>
     public class SubtitleCleaner
     {
         /// <summary>
-        /// Làm s?ch toàn b? subtitle
+        /// Làm sạch toàn bộ subtitle
         /// </summary>
         public List<SubtitleItem> CleanSubtitles(List<SubtitleItem> subtitles)
         {
@@ -17,26 +18,65 @@ namespace HardSubExtractor.Services
 
             var cleaned = new List<SubtitleItem>(subtitles);
 
-            // Bước 1: Remove duplicate lines trong mỗi subtitle
+            // Bước 1: Clean text của mỗi subtitle (remove OCR noise)
+            cleaned = CleanOcrText(cleaned);
+
+            // Bước 2: Remove duplicate lines trong mỗi subtitle
             cleaned = RemoveDuplicateLines(cleaned);
 
-            // Bước 2: Merge subtitle quá ngắn
-            cleaned = MergeShortSubtitles(cleaned, minDuration: 300);
+            // Bước 3: Merge subtitle quá ngắn (v5: lowered from 300 to 150)
+            cleaned = MergeShortSubtitles(cleaned, minDuration: 150);
 
-            // Bước 3: Split subtitle quá dài (gi? t?i ?a 2 dòng)
+            // Bước 4: Split subtitle quá dài (giữ tối đa 2 dòng)
             cleaned = SplitLongSubtitles(cleaned, maxLines: 2);
 
-            // Bước 4: Remove subtitle tr?ng ho?c rác
+            // Bước 5: Remove subtitle trống hoặc rác
             cleaned = RemoveInvalidSubtitles(cleaned);
 
-            // Bước 5: Re-index
+            // Bước 6: Fix overlapping times
+            cleaned = FixOverlappingTimes(cleaned);
+
+            // Bước 7: Re-index
             cleaned = ReIndexSubtitles(cleaned);
 
             return cleaned;
         }
 
         /// <summary>
-        /// Remove các dòng duplicate trong m?i subtitle
+        /// v2.0: Clean OCR noise from each subtitle's text
+        /// </summary>
+        private List<SubtitleItem> CleanOcrText(List<SubtitleItem> subtitles)
+        {
+            foreach (var sub in subtitles)
+            {
+                var text = sub.Text;
+                
+                // Remove common OCR noise characters
+                text = text.Replace("|", "");
+                text = text.Replace("_", " ");
+                
+                // Remove isolated single special characters (likely noise)
+                text = System.Text.RegularExpressions.Regex.Replace(text, @"(?<=\s|^)[^\w\s\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af](?=\s|$)", "");
+                
+                // Clean multiple spaces
+                text = System.Text.RegularExpressions.Regex.Replace(text, @"  +", " ");
+                
+                // Clean multiple newlines
+                text = System.Text.RegularExpressions.Regex.Replace(text, @"\n{3,}", "\n\n");
+                
+                // Remove leading/trailing whitespace per line
+                var lines = text.Split('\n')
+                               .Select(l => l.Trim())
+                               .Where(l => !string.IsNullOrWhiteSpace(l));
+                
+                sub.Text = string.Join("\n", lines);
+            }
+            
+            return subtitles;
+        }
+
+        /// <summary>
+        /// Remove các dòng duplicate trong mỗi subtitle
         /// </summary>
         private List<SubtitleItem> RemoveDuplicateLines(List<SubtitleItem> subtitles)
         {
@@ -69,7 +109,7 @@ namespace HardSubExtractor.Services
             {
                 var nextSub = subtitles[i];
 
-                // N?u subtitle hi?n t?i quá ng?n, merge v?i subtitle k? ti?p
+                // Nếu subtitle hiện tại quá ngắn, merge với subtitle kế tiếp
                 if (currentSub.Duration < minDuration && 
                     nextSub.StartTime - currentSub.EndTime < 500) // gap < 500ms
                 {
@@ -99,7 +139,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Split subtitle có quá nhi?u dòng (gi? t?i ?a maxLines dòng)
+        /// Split subtitle có quá nhiều dòng (giữ tối đa maxLines dòng)
         /// </summary>
         private List<SubtitleItem> SplitLongSubtitles(List<SubtitleItem> subtitles, int maxLines)
         {
@@ -118,7 +158,7 @@ namespace HardSubExtractor.Services
                     continue;
                 }
 
-                // Split thành nhi?u subtitle
+                // Split thành nhiều subtitle
                 var duration = sub.Duration;
                 var durationPerLine = duration / lines.Count;
 
@@ -142,27 +182,58 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Remove subtitle không h?p l? (tr?ng, quá ng?n, toàn ký t? rác)
+        /// Remove subtitle không hợp lệ (trống, quá ngắn, toàn ký tự rác)
         /// </summary>
         private List<SubtitleItem> RemoveInvalidSubtitles(List<SubtitleItem> subtitles)
         {
             return subtitles.Where(sub =>
             {
-                // Subtitle tr?ng
+                // Subtitle trống
                 if (string.IsNullOrWhiteSpace(sub.Text))
                     return false;
 
-                // Subtitle quá ng?n (< 100ms)
-                if (sub.Duration < 100)
+                // Subtitle quá ngắn (< 80ms) - v5: lowered from 100
+                if (sub.Duration < 80)
                     return false;
 
-                // Subtitle ch? có 1 ký t?
-                if (sub.Text.Trim().Length < 2)
+                // Subtitle chỉ có 1 ký tự (but allow single CJK)
+                var trimmedText = sub.Text.Trim();
+                if (trimmedText.Length < 2)
+                {
+                    // v5: Allow single CJK character
+                    if (trimmedText.Length == 1)
+                    {
+                        char c = trimmedText[0];
+                        bool isCjk = c >= 0x4E00 && c <= 0x9FFF || 
+                                     c >= 0x3040 && c <= 0x30FF || 
+                                     c >= 0xAC00 && c <= 0xD7AF;
+                        if (isCjk) return true;
+                    }
                     return false;
+                }
 
-                // Subtitle toàn ký t? ??c bi?t (rác OCR)
+                // v5: Check for CJK content - be lenient
+                bool hasCjk = sub.Text.Any(c => c >= 0x4E00 && c <= 0x9FFF || 
+                                                c >= 0x3040 && c <= 0x30FF || 
+                                                c >= 0xAC00 && c <= 0xD7AF);
+                
+                // Subtitle toàn ký tự đặc biệt (rác OCR)
                 var alphanumericCount = sub.Text.Count(c => char.IsLetterOrDigit(c));
-                if (alphanumericCount < 2)
+                if (hasCjk)
+                {
+                    // CJK: even a single recognizable character is valid
+                    if (alphanumericCount < 1)
+                        return false;
+                }
+                else
+                {
+                    if (alphanumericCount < 2)
+                        return false;
+                }
+
+                // Single repeated character (OCR artifact)
+                var cleanText = sub.Text.Replace(" ", "").Replace("\n", "");
+                if (cleanText.Length > 2 && cleanText.Distinct().Count() <= 1)
                     return false;
 
                 return true;
@@ -170,7 +241,37 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Re-index subtitle t? 1
+        /// v2.0: Fix overlapping subtitle times
+        /// </summary>
+        private List<SubtitleItem> FixOverlappingTimes(List<SubtitleItem> subtitles)
+        {
+            if (subtitles.Count <= 1)
+                return subtitles;
+
+            for (int i = 0; i < subtitles.Count - 1; i++)
+            {
+                var current = subtitles[i];
+                var next = subtitles[i + 1];
+
+                // If current end time overlaps with next start time
+                if (current.EndTime > next.StartTime)
+                {
+                    // Set current end time to just before next start time
+                    current.EndTime = next.StartTime - 30; // v5: 30ms gap (was 50ms)
+                    
+                    // Ensure minimum duration
+                    if (current.EndTime - current.StartTime < 100)
+                    {
+                        current.EndTime = current.StartTime + 100;
+                    }
+                }
+            }
+
+            return subtitles;
+        }
+
+        /// <summary>
+        /// Re-index subtitle từ 1
         /// </summary>
         private List<SubtitleItem> ReIndexSubtitles(List<SubtitleItem> subtitles)
         {
@@ -197,20 +298,20 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Remove các ký t? rác th??ng g?p t? OCR
+        /// Remove các ký tự rác thường gặp từ OCR
         /// </summary>
         public string RemoveOcrNoise(string text)
         {
             if (string.IsNullOrWhiteSpace(text))
                 return string.Empty;
 
-            // Replace các pattern rác th??ng g?p
+            // Replace các pattern rác thường gặp
             var cleanText = text;
 
-            // Remove | th??ng xu?t hi?n t? border
+            // Remove | thường xuất hiện từ border
             cleanText = cleanText.Replace("|", "");
             
-            // Remove _ th??ng xu?t hi?n t? underline
+            // Remove _ thường xuất hiện từ underline
             cleanText = cleanText.Replace("_", "");
 
             // Remove multiple spaces
@@ -221,7 +322,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// ??m s? subtitle
+        /// Đếm số subtitle
         /// </summary>
         public int CountValidSubtitles(List<SubtitleItem> subtitles)
         {
@@ -229,7 +330,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// L?y th?ng kê subtitle
+        /// Lấy thống kê subtitle
         /// </summary>
         public SubtitleStatistics GetStatistics(List<SubtitleItem> subtitles)
         {
@@ -249,7 +350,7 @@ namespace HardSubExtractor.Services
     }
 
     /// <summary>
-    /// Th?ng kê subtitle
+    /// Thống kê subtitle
     /// </summary>
     public class SubtitleStatistics
     {

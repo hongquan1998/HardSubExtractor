@@ -58,8 +58,9 @@ namespace HardSubExtractor.Services
         /// <summary>
         /// Auto kéo endTime nếu subtitle đổi chậm
         /// Kéo dài subtitle nếu gap với subtitle kế tiếp quá lớn
+        /// v5: Cap extension to avoid absurdly long subtitles
         /// </summary>
-        public List<SubtitleItem> ExtendDuration(List<SubtitleItem> subtitles, long maxGap = 1000)
+        public List<SubtitleItem> ExtendDuration(List<SubtitleItem> subtitles, long maxGap = 1000, long maxExtension = 3000)
         {
             if (subtitles.Count <= 1)
                 return subtitles;
@@ -73,10 +74,21 @@ namespace HardSubExtractor.Services
 
                 var gap = next.StartTime - current.EndTime;
 
-                // Nếu gap quá lớn, kéo dài current
+                // v5: Only extend if gap is reasonable, cap to maxExtension
                 if (gap > maxGap)
                 {
-                    current.EndTime = next.StartTime - 50; // giữ 50ms gap
+                    long newEndTime = next.StartTime - 50; // 50ms gap
+                    long extension = newEndTime - current.EndTime;
+                    
+                    // Don't extend more than maxExtension
+                    if (extension > maxExtension)
+                    {
+                        current.EndTime = current.EndTime + maxExtension;
+                    }
+                    else
+                    {
+                        current.EndTime = newEndTime;
+                    }
                 }
             }
 
@@ -213,22 +225,23 @@ namespace HardSubExtractor.Services
 
         /// <summary>
         /// Auto fix tất cả vấn đề về thời gian
+        /// v5: Less aggressive - preserve original timing where possible
         /// </summary>
         public List<SubtitleItem> AutoFix(List<SubtitleItem> subtitles)
         {
             var fixedSubtitles = new List<SubtitleItem>(subtitles);
 
-            // Bước 1: Set minimum duration
-            fixedSubtitles = SetMinimumDuration(fixedSubtitles, 500);
+            // Step 1: Set minimum duration (300ms - enough for single word flash)
+            fixedSubtitles = SetMinimumDuration(fixedSubtitles, 300);
 
-            // Bước 2: Set maximum duration
+            // Step 2: Set maximum duration
             fixedSubtitles = SetMaximumDuration(fixedSubtitles, 10000);
 
-            // Bước 3: Fix overlap
-            fixedSubtitles = FixOverlap(fixedSubtitles, minGap: 50);
+            // Step 3: Fix overlap using midpoint strategy
+            fixedSubtitles = FixOverlap(fixedSubtitles, minGap: 30);
 
-            // Bước 4: Extend duration nếu gap quá lớn
-            fixedSubtitles = ExtendDuration(fixedSubtitles, maxGap: 2000);
+            // Step 4: Extend duration if gap is large, but cap extension
+            fixedSubtitles = ExtendDuration(fixedSubtitles, maxGap: 2000, maxExtension: 3000);
 
             return fixedSubtitles;
         }

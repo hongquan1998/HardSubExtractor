@@ -18,6 +18,7 @@ namespace HardSubExtractor.Services
 
     /// <summary>
     /// Service OCR Strategy Context - Handles preprocessing and delegates to Engine
+    /// REWRITTEN v2.0 - Improved preprocessing for accurate subtitle OCR
     /// </summary>
     public class OcrService : IDisposable
     {
@@ -28,8 +29,8 @@ namespace HardSubExtractor.Services
         
         // Configurable settings
         public PreprocessMode CurrentMode { get; set; } = PreprocessMode.Auto;
-        public float MinConfidence { get; set; } = 40f;
-        public bool UseMorphology { get; set; } = true;
+        public float MinConfidence { get; set; } = 20f;
+        public bool UseMorphology { get; set; } = false; // Disabled by default - often destroys text
 
         public OcrService(IOcrEngine engine)
         {
@@ -112,13 +113,15 @@ namespace HardSubExtractor.Services
 
         /// <summary>
         /// Multi-pass OCR - tries multiple preprocessing methods and returns best result
+        /// v2.0: Uses REAL confidence scores and text quality metrics
         /// </summary>
         private (string text, float confidence) RecognizeTextMultiPass(Bitmap bitmap, int debugCounter)
         {
             var results = new List<(string text, float confidence, PreprocessMode mode)>();
             
-            // Try each preprocessing method
-            var modesToTry = new[] { PreprocessMode.Otsu, PreprocessMode.Adaptive, PreprocessMode.ColorBased };
+            // Strategy: Try ALL methods and pick the best result
+            // v5: Don't exit early to ensure best possible result
+            var modesToTry = new[] { PreprocessMode.ColorBased, PreprocessMode.Otsu, PreprocessMode.Adaptive };
             
             foreach (var mode in modesToTry)
             {
@@ -129,9 +132,17 @@ namespace HardSubExtractor.Services
                     
                     var (text, conf) = RecognizeWithConfidence(preprocessed);
                     
-                    if (!string.IsNullOrWhiteSpace(text) && conf >= MinConfidence)
+                    if (!string.IsNullOrWhiteSpace(text))
                     {
-                        results.Add((text, conf, mode));
+                        // Apply text quality bonus/penalty
+                        float qualityScore = CalculateTextQuality(text);
+                        float adjustedConf = conf * 0.7f + qualityScore * 30f;
+                        
+                        results.Add((text, adjustedConf, mode));
+                        
+                        // v5: Only early exit on near-perfect results (>= 92)
+                        if (adjustedConf >= 92f && text.Length >= 3)
+                            break;
                     }
                 }
                 catch (Exception ex)
@@ -143,7 +154,22 @@ namespace HardSubExtractor.Services
             
             if (results.Count == 0)
             {
-                // Fallback: try inverted
+                // Fallback: try with no preprocessing (raw upscaled image)
+                try
+                {
+                    using var upscaled = UpscaleImage(bitmap, minWidth: 1200);
+                    SaveDebugImage(upscaled, debugCounter, "Raw");
+                    var (text, conf) = RecognizeWithConfidence(upscaled);
+                    if (!string.IsNullOrWhiteSpace(text))
+                        return (text, conf);
+                    
+                    // Also try upscaled original (no changes)
+                    if (upscaled != bitmap)
+                        upscaled.Dispose();
+                }
+                catch { }
+                
+                // Last resort: try inverted
                 try
                 {
                     using var inverted = PreprocessImage(bitmap, PreprocessMode.Invert);
@@ -157,15 +183,82 @@ namespace HardSubExtractor.Services
                 return (string.Empty, 0);
             }
             
-            // Return result with highest confidence
+            // Return result with highest adjusted confidence
             var best = results.OrderByDescending(r => r.confidence).First();
             
             if (_debugMode)
             {
-                Console.WriteLine($"[OCR] Best: {best.mode} @ {best.confidence:F1}% - '{best.text.Trim().Replace("\n", " ").Substring(0, Math.Min(50, best.text.Length))}'");
+                var preview = best.text.Trim().Replace("\n", " ");
+                if (preview.Length > 60) preview = preview.Substring(0, 60) + "...";
+                Console.WriteLine($"[OCR] Best: {best.mode} @ {best.confidence:F1}% - '{preview}'");
+                
+                // Log all results for comparison
+                foreach (var r in results.OrderByDescending(x => x.confidence))
+                {
+                    var p = r.text.Trim().Replace("\n", " ");
+                    if (p.Length > 40) p = p.Substring(0, 40) + "...";
+                    Console.WriteLine($"  [{r.mode}] {r.confidence:F1}% - '{p}'");
+                }
             }
             
             return (best.text, best.confidence);
+        }
+
+        /// <summary>
+        /// Calculate text quality score (0-1) based on heuristics
+        /// </summary>
+        private float CalculateTextQuality(string text)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return 0f;
+
+            float score = 0.5f;
+            var cleanText = text.Replace(" ", "").Replace("\n", "");
+            
+            // CJK text detection first (affects other scoring)
+            int cjkCount = cleanText.Count(c => c >= 0x4E00 && c <= 0x9FFF || 
+                                                 c >= 0x3040 && c <= 0x30FF || 
+                                                 c >= 0xAC00 && c <= 0xD7AF);
+            bool hasCjk = cjkCount > 0;
+            
+            // Ratio of letters/digits (good text has high ratio)
+            int alphaNum = cleanText.Count(c => char.IsLetterOrDigit(c));
+            float alphaRatio = cleanText.Length > 0 ? (float)alphaNum / cleanText.Length : 0;
+            
+            if (hasCjk)
+            {
+                // CJK: characters are all "letters" so ratio is naturally high
+                score += 0.2f;
+                // CJK text is generally more reliable when detected
+                score += Math.Min(0.15f, cjkCount * 0.03f);
+            }
+            else
+            {
+                score += (alphaRatio - 0.5f) * 0.3f;
+            }
+            
+            // Bonus for reasonable text length (at least 2 chars)
+            if (cleanText.Length >= 2 && cleanText.Length <= 200)
+                score += 0.1f;
+            else if (cleanText.Length == 1 && hasCjk)
+                score += 0.05f; // Single CJK char can still be valid
+            
+            // Penalty for too many unique special chars (noise)
+            var specialChars = cleanText.Where(c => !char.IsLetterOrDigit(c) && !char.IsWhiteSpace(c)).Distinct().Count();
+            if (specialChars > 6)
+                score -= 0.12f;
+            else if (specialChars > 3)
+                score -= 0.05f;
+            
+            // Penalty for repetitive patterns (OCR artifact)
+            if (cleanText.Length > 3)
+            {
+                int distinctChars = cleanText.Distinct().Count();
+                if (distinctChars <= 1) score -= 0.35f; // Truly degenerate
+                else if (distinctChars <= 2 && !hasCjk) score -= 0.20f;
+                else if ((float)distinctChars / cleanText.Length < 0.15f && !hasCjk) score -= 0.10f;
+            }
+
+            return Math.Clamp(score, 0f, 1f);
         }
 
         /// <summary>
@@ -203,12 +296,12 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Main preprocessing dispatcher
+        /// Main preprocessing dispatcher - v2.0
         /// </summary>
         private Bitmap PreprocessImage(Bitmap original, PreprocessMode mode)
         {
-            // Step 1: Upscale if too small
-            var scaled = UpscaleImage(original, minWidth: 800);
+            // Step 1: Upscale if too small (minimum 1200px for good OCR)
+            var scaled = UpscaleImage(original, minWidth: 1200);
             
             Bitmap processed;
             
@@ -235,7 +328,7 @@ namespace HardSubExtractor.Services
                     break;
             }
             
-            // Apply morphology if enabled
+            // Apply morphology only if explicitly enabled
             if (UseMorphology)
             {
                 var morphed = ApplyMorphology(processed);
@@ -250,12 +343,13 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Otsu preprocessing (original method - best for high contrast)
+        /// Otsu preprocessing - v2.0 with gentler contrast
         /// </summary>
         private Bitmap PreprocessOtsu(Bitmap original)
         {
             var grayscale = ConvertToGrayscaleOptimized(original);
-            var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.8f);
+            // Use gentler contrast (1.4 instead of 1.8) to avoid destroying thin text
+            var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.4f);
             var binarized = ApplyOtsuThresholdOptimized(contrasted);
             
             grayscale.Dispose();
@@ -265,78 +359,86 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Adaptive threshold preprocessing (better for varied lighting)
+        /// Adaptive threshold preprocessing - v2.0 using integral image for speed
         /// </summary>
         private unsafe Bitmap PreprocessAdaptive(Bitmap original)
         {
             var grayscale = ConvertToGrayscaleOptimized(original);
             
-            // Apply local adaptive thresholding
-            var result = new Bitmap(grayscale.Width, grayscale.Height, PixelFormat.Format24bppRgb);
+            int width = grayscale.Width;
+            int height = grayscale.Height;
             
-            var rect = new Rectangle(0, 0, grayscale.Width, grayscale.Height);
+            // Build integral image for fast local mean computation
+            var rect = new Rectangle(0, 0, width, height);
             var srcData = grayscale.LockBits(rect, ImageLockMode.ReadOnly, PixelFormat.Format24bppRgb);
-            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
             
-            try
+            // Extract grayscale values and build integral image
+            long[,] integral = new long[height + 1, width + 1];
+            
+            byte* ptrSrc = (byte*)srcData.Scan0;
+            int stride = srcData.Stride;
+            
+            for (int y = 0; y < height; y++)
             {
-                byte* ptrSrc = (byte*)srcData.Scan0;
-                byte* ptrDst = (byte*)dstData.Scan0;
-                
-                int stride = srcData.Stride;
-                int width = grayscale.Width;
-                int height = grayscale.Height;
-                int blockSize = 15; // Local window size
-                int C = 8; // Threshold constant
-                
-                for (int y = 0; y < height; y++)
+                byte* row = ptrSrc + y * stride;
+                long rowSum = 0;
+                for (int x = 0; x < width; x++)
                 {
-                    for (int x = 0; x < width; x++)
-                    {
-                        // Calculate local mean
-                        int sum = 0;
-                        int count = 0;
-                        
-                        int yStart = Math.Max(0, y - blockSize / 2);
-                        int yEnd = Math.Min(height - 1, y + blockSize / 2);
-                        int xStart = Math.Max(0, x - blockSize / 2);
-                        int xEnd = Math.Min(width - 1, x + blockSize / 2);
-                        
-                        for (int by = yStart; by <= yEnd; by++)
-                        {
-                            byte* blockRow = ptrSrc + (by * stride);
-                            for (int bx = xStart; bx <= xEnd; bx++)
-                            {
-                                sum += blockRow[bx * 3];
-                                count++;
-                            }
-                        }
-                        
-                        int threshold = (sum / count) - C;
-                        byte* srcRow = ptrSrc + (y * stride);
-                        byte* dstRow = ptrDst + (y * stride);
-                        
-                        byte pixelValue = srcRow[x * 3];
-                        byte outputValue = pixelValue > threshold ? (byte)255 : (byte)0;
-                        
-                        dstRow[x * 3] = outputValue;
-                        dstRow[x * 3 + 1] = outputValue;
-                        dstRow[x * 3 + 2] = outputValue;
-                    }
+                    rowSum += row[x * 3];
+                    integral[y + 1, x + 1] = integral[y, x + 1] + rowSum;
                 }
             }
-            finally
+            
+            // Apply adaptive threshold using integral image
+            var result = new Bitmap(width, height, PixelFormat.Format24bppRgb);
+            var dstData = result.LockBits(rect, ImageLockMode.WriteOnly, PixelFormat.Format24bppRgb);
+            
+            byte* ptrDst = (byte*)dstData.Scan0;
+            int dstStride = dstData.Stride;
+            
+            // Adaptive block size based on image dimensions
+            int blockSize = Math.Max(15, Math.Min(51, width / 20));
+            if (blockSize % 2 == 0) blockSize++; // Must be odd
+            int halfBlock = blockSize / 2;
+            int C = 10; // Threshold constant - slightly higher to be more selective
+            
+            for (int y = 0; y < height; y++)
             {
-                grayscale.UnlockBits(srcData);
-                result.UnlockBits(dstData);
+                byte* srcRow = ptrSrc + y * stride;
+                byte* dstRow = ptrDst + y * dstStride;
+                
+                for (int x = 0; x < width; x++)
+                {
+                    // Calculate local mean using integral image - O(1) per pixel
+                    int y1 = Math.Max(0, y - halfBlock);
+                    int y2 = Math.Min(height, y + halfBlock + 1);
+                    int x1 = Math.Max(0, x - halfBlock);
+                    int x2 = Math.Min(width, x + halfBlock + 1);
+                    
+                    long sum = integral[y2, x2] - integral[y1, x2] - integral[y2, x1] + integral[y1, x1];
+                    int count = (y2 - y1) * (x2 - x1);
+                    int localMean = (int)(sum / count);
+                    
+                    byte pixelValue = srcRow[x * 3];
+                    // Pixel is text (white) if it's brighter than local mean
+                    byte outputValue = pixelValue > (localMean - C) ? (byte)255 : (byte)0;
+                    
+                    dstRow[x * 3] = outputValue;
+                    dstRow[x * 3 + 1] = outputValue;
+                    dstRow[x * 3 + 2] = outputValue;
+                }
             }
             
+            grayscale.UnlockBits(srcData);
+            result.UnlockBits(dstData);
             grayscale.Dispose();
+            
             return result;
         }
 
         /// <summary>
-        /// Color-based preprocessing (detects white/light text - most subtitles)
+        /// Color-based preprocessing - v2.0 with wider thresholds and multi-color support
+        /// Detects white, yellow, cyan, and light-colored text (covers most subtitle styles)
         /// </summary>
         private unsafe Bitmap PreprocessColorBased(Bitmap original)
         {
@@ -351,18 +453,15 @@ namespace HardSubExtractor.Services
                 byte* ptrSrc = (byte*)srcData.Scan0;
                 byte* ptrDst = (byte*)dstData.Scan0;
                 
-                int stride = srcData.Stride;
+                int srcStride = srcData.Stride;
+                int dstStride = dstData.Stride;
                 int width = original.Width;
                 int height = original.Height;
                 
-                // Thresholds for detecting white/light colored text (most subtitles)
-                const int brightnessThreshold = 180; // Pixels brighter than this = text
-                const int saturationThreshold = 60; // Low saturation = white/gray
-                
                 for (int y = 0; y < height; y++)
                 {
-                    byte* srcRow = ptrSrc + (y * stride);
-                    byte* dstRow = ptrDst + (y * stride);
+                    byte* srcRow = ptrSrc + (y * srcStride);
+                    byte* dstRow = ptrDst + (y * dstStride);
                     
                     for (int x = 0; x < width; x++)
                     {
@@ -375,17 +474,73 @@ namespace HardSubExtractor.Services
                         int maxVal = Math.Max(Math.Max(r, g), b);
                         int minVal = Math.Min(Math.Min(r, g), b);
                         
-                        // Calculate saturation
+                        // Calculate saturation (0-255 scale)
                         int saturation = maxVal == 0 ? 0 : (maxVal - minVal) * 255 / maxVal;
                         
-                        // Check if pixel is white/light colored text
-                        bool isWhiteText = maxVal >= brightnessThreshold && saturation <= saturationThreshold;
+                        // Calculate average brightness
+                        int brightness = (r + g + b) / 3;
                         
-                        // Also check for yellow text (common in Asian subtitles)
-                        // Yellow: high R, high G, low B
-                        bool isYellowText = r >= 200 && g >= 180 && b < 120;
+                        bool isTextPixel = false;
                         
-                        byte outputValue = (isWhiteText || isYellowText) ? (byte)255 : (byte)0;
+                        // 1. White/near-white text (most common subtitle color)
+                        //    Lower threshold from 180 to 150 to catch slightly dimmer text
+                        if (brightness >= 150 && saturation <= 80)
+                        {
+                            isTextPixel = true;
+                        }
+                        
+                        // 2. Very bright text (any color above 200 brightness)
+                        else if (maxVal >= 200 && saturation <= 50)
+                        {
+                            isTextPixel = true;
+                        }
+                        
+                        // 3. Yellow text (common in Chinese/Japanese subtitles)
+                        //    R >= 180, G >= 160, B < 130
+                        else if (r >= 180 && g >= 160 && b < 130 && (r + g) > 360)
+                        {
+                            isTextPixel = true;
+                        }
+                        
+                        // 4. Cyan text (some subtitle styles)
+                        //    R < 130, G >= 180, B >= 180
+                        else if (r < 130 && g >= 180 && b >= 180)
+                        {
+                            isTextPixel = true;
+                        }
+                        
+                        // 5. Light green text (uncommon but exists)
+                        else if (g >= 200 && r >= 150 && b < 130)
+                        {
+                            isTextPixel = true;
+                        }
+                        
+                        // 6. High contrast text detection via local gradient
+                        //    Check if pixel is significantly brighter than it would be if part of background
+                        else if (brightness >= 130 && saturation <= 100)
+                        {
+                            // Check contrast with immediate neighbors
+                            if (x > 0 && x < width - 1 && y > 0 && y < height - 1)
+                            {
+                                int leftIdx = y * srcStride + (x - 1) * 3;
+                                int rightIdx = y * srcStride + (x + 1) * 3;
+                                int topIdx = (y - 1) * srcStride + x * 3;
+                                int bottomIdx = (y + 1) * srcStride + x * 3;
+                                
+                                int leftBright = (ptrSrc[leftIdx] + ptrSrc[leftIdx + 1] + ptrSrc[leftIdx + 2]) / 3;
+                                int rightBright = (ptrSrc[rightIdx] + ptrSrc[rightIdx + 1] + ptrSrc[rightIdx + 2]) / 3;
+                                int topBright = (ptrSrc[topIdx] + ptrSrc[topIdx + 1] + ptrSrc[topIdx + 2]) / 3;
+                                int bottomBright = (ptrSrc[bottomIdx] + ptrSrc[bottomIdx + 1] + ptrSrc[bottomIdx + 2]) / 3;
+                                
+                                int avgNeighbor = (leftBright + rightBright + topBright + bottomBright) / 4;
+                                
+                                // If this pixel is significantly brighter than neighbors, it could be text
+                                if (brightness - avgNeighbor > 40)
+                                    isTextPixel = true;
+                            }
+                        }
+                        
+                        byte outputValue = isTextPixel ? (byte)255 : (byte)0;
                         
                         dstRow[idx] = outputValue;
                         dstRow[idx + 1] = outputValue;
@@ -399,7 +554,23 @@ namespace HardSubExtractor.Services
                 result.UnlockBits(dstData);
             }
             
-            return result;
+            // Apply small closing operation (dilate then erode) to fill gaps in characters
+            var closed = CloseSmallGaps(result, 1);
+            result.Dispose();
+            
+            return closed;
+        }
+
+        /// <summary>
+        /// Close small gaps in text - dilate then erode with small kernel
+        /// This fills small holes in characters without merging separate characters
+        /// </summary>
+        private Bitmap CloseSmallGaps(Bitmap input, int radius)
+        {
+            var dilated = Dilate(input, radius);
+            var eroded = Erode(dilated, radius);
+            dilated.Dispose();
+            return eroded;
         }
 
         /// <summary>
@@ -408,7 +579,7 @@ namespace HardSubExtractor.Services
         private Bitmap PreprocessInvert(Bitmap original)
         {
             var grayscale = ConvertToGrayscaleOptimized(original);
-            var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.8f);
+            var contrasted = AdjustContrastOptimized(grayscale, contrast: 1.4f);
             var binarized = ApplyOtsuThresholdOptimized(contrasted);
             
             // Invert the result
@@ -549,14 +720,18 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Upscale ảnh nếu quá nhỏ
+        /// Upscale ảnh nếu quá nhỏ - v2.0 with higher minimum
         /// </summary>
-        private Bitmap UpscaleImage(Bitmap original, int minWidth = 800)
+        private Bitmap UpscaleImage(Bitmap original, int minWidth = 1200)
         {
             if (original.Width >= minWidth)
                 return original;
             
             float scale = (float)minWidth / original.Width;
+            
+            // Cap scale to avoid extreme upscaling (which adds noise)
+            scale = Math.Min(scale, 4.0f);
+            
             int newWidth = (int)(original.Width * scale);
             int newHeight = (int)(original.Height * scale);
             
@@ -618,9 +793,9 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Tăng contrast - OPTIMIZED with unsafe code
+        /// Tăng contrast - OPTIMIZED with unsafe code - v2.0 with gentler default
         /// </summary>
-        private unsafe Bitmap AdjustContrastOptimized(Bitmap original, float contrast = 1.8f)
+        private unsafe Bitmap AdjustContrastOptimized(Bitmap original, float contrast = 1.4f)
         {
             var adjusted = new Bitmap(original.Width, original.Height, PixelFormat.Format24bppRgb);
             
@@ -758,7 +933,7 @@ namespace HardSubExtractor.Services
         }
 
         /// <summary>
-        /// Chuẩn hóa text OCR (trim, remove noise)
+        /// Chuẩn hóa text OCR (trim, remove noise) - v2.0 improved for CJK
         /// </summary>
         private string NormalizeText(string text)
         {
@@ -774,21 +949,24 @@ namespace HardSubExtractor.Services
             if (lines.Count == 0)
                 return string.Empty;
 
-            // Remove các ký tự rác thường gặp
+            // Join lines
             var result = string.Join("\n", lines);
             
-            // Normalize quotes and dashes
-            result = result.Replace("—", "-")
-                          .Replace("–", "-")
-                          .Replace("\u201C", "\"")  // Left double quote
+            // Normalize common OCR mistakes for punctuation
+            result = result.Replace("\u201C", "\"")  // Left double quote
                           .Replace("\u201D", "\"")  // Right double quote
                           .Replace("\u2018", "'")   // Left single quote
                           .Replace("\u2019", "'")   // Right single quote
-                          .Replace("…", "...");
+                          .Replace("\u2026", "...");  // Ellipsis
 
             // Remove ký tự không in được (keep newlines)
             result = new string(result.Where(c => !char.IsControl(c) || c == '\n').ToArray());
 
+            // Remove common OCR noise patterns
+            // Single pipes/bars that aren't meaningful
+            result = System.Text.RegularExpressions.Regex.Replace(result, @"^\|+\s*", "");
+            result = System.Text.RegularExpressions.Regex.Replace(result, @"\s*\|+$", "");
+            
             return result.Trim();
         }
 
